@@ -12,7 +12,7 @@ from sklearn.preprocessing import StandardScaler
 from pytorch_forecasting.metrics import QuantileLoss
 from tft import PollutionTFT
 
-def train_model(df_long, tft_dataset):
+def train_model(df_long, tft_dataset, hyparams):
 
     val_dataset = TimeSeriesDataSet.from_dataset(
         tft_dataset,
@@ -23,11 +23,11 @@ def train_model(df_long, tft_dataset):
 
     tft = TemporalFusionTransformer.from_dataset(
         tft_dataset,
-        learning_rate =1e-3, #0.3, #changed to run efficiently on CPU
-        hidden_size = 16,
-        attention_head_size = 1,
-        dropout = 0.1,
-        hidden_continuous_size = 8,
+        learning_rate =hyparams["lr"], #0.3, #changed to run efficiently on CPU
+        hidden_size = hyparams["hid_size"],
+        attention_head_size = hyparams["attention_head_size"],
+        dropout = hyparams["dropout"],
+        hidden_continuous_size = hyparams["hid_cont_size"],
         output_size = 7,
         loss=QuantileLoss(),
         log_interval=-1,
@@ -56,11 +56,11 @@ def train_model(df_long, tft_dataset):
     print(TemporalFusionTransformer.__module__)
 
     trainer = Trainer(
-        max_epochs=50,
+        max_epochs=hyparams["max_epochs"],
         accelerator="cpu",
         devices=1,
-        gradient_clip_val=0.1,
-        limit_train_batches=30, #changed 1 to run efficiently on CPU
+        gradient_clip_val=hyparams["grad_clip_val"],
+        limit_train_batches=hyparams["lim_train_batch"], #changed 1 to run efficiently on CPU
         log_every_n_steps=10,
         callbacks=[early_stop,checkpoint_cb]
 
