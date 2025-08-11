@@ -1,11 +1,12 @@
 import torch
-from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
+from pytorch_forecasting import TimeSeriesDataSet
 from pytorch_forecasting.metrics import SMAPE
 import matplotlib.pyplot as plt
+from tft import PollutionTFT
 
 def evaluate_model(df_long, tft_dataset, bmp):
     #loading best model checkpoint saved in tft_training.py
-    model_from_best_check_point = TemporalFusionTransformer.load_from_checkpoint(bmp)
+    model_from_best_check_point = PollutionTFT.load_from_checkpoint(bmp)
 
     # Setting up validation dataloader as done in training.py
     val_dataset = TimeSeriesDataSet.from_dataset(

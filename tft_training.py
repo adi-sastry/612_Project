@@ -1,4 +1,4 @@
-from pytorch_forecasting import TimeSeriesDataSet, NaNLabelEncoder,GroupNormalizer, TemporalFusionTransformer
+from pytorch_forecasting import TimeSeriesDataSet, NaNLabelEncoder,GroupNormalizer
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 # import torch
@@ -21,7 +21,7 @@ def train_model(df_long, tft_dataset, hyparams):
         stop_randomization = True,
     )
 
-    tft = TemporalFusionTransformer.from_dataset(
+    tft = PollutionTFT.from_dataset(
         tft_dataset,
         learning_rate =hyparams["lr"], #0.3, #changed to run efficiently on CPU
         hidden_size = hyparams["hid_size"],
@@ -50,10 +50,6 @@ def train_model(df_long, tft_dataset, hyparams):
         save_top_k=1,
         mode='min'
     )
-
-    print(type(tft))
-    print(isinstance(tft, pytorch_lightning.LightningModule))
-    print(TemporalFusionTransformer.__module__)
 
     trainer = Trainer(
         max_epochs=hyparams["max_epochs"],
