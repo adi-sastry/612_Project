@@ -2,6 +2,7 @@ from pytorch_forecasting import TemporalFusionTransformer
 import torch
 from torch import nn
 from typing import Dict
+import math
 
 class CrossTargetAttention(nn.Module):
     def __init__(self, input_dim, hidden_dim, num_heads=1):
@@ -16,6 +17,22 @@ class CrossTargetAttention(nn.Module):
         out, _ = self.attn(x, x, x)
         out = out.reshape(B, T, x.shape[1], D).permute(0, 2, 1, 3)  # (B, targets, time, D)
         return self.proj(out)
+    
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 5000):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe.unsqueeze(0))  # (1, max_len, d_model)
+
+    def forward(self, x):
+        # x shape: (batch_size, seq_len, d_model)
+        seq_len = x.size(1)
+        x = x + self.pe[:, :seq_len]
+        return x
 
 class PollutionTFT(TemporalFusionTransformer):
     def __init__(self, *args, **kwargs):
@@ -25,6 +42,11 @@ class PollutionTFT(TemporalFusionTransformer):
             input_dim=self.hparams.hidden_size,
             hidden_dim=self.hparams.hidden_size,
             num_heads=1
+        )
+
+        self.positional_encoding = SinusoidalPositionalEncoding(
+            self.hparams.hidden_size, 
+            max_len=5000
         )
     
     def forward(self, x: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -69,6 +91,9 @@ class PollutionTFT(TemporalFusionTransformer):
             static_context_variable_selection[:, :max_encoder_length],
         )
 
+        # NEW ADDITION --- ADD SINUSOIDAL POSITIONAL ENCODING HERE for encoder embeddings ---
+        embeddings_varying_encoder = self.positional_encoding(embeddings_varying_encoder)
+
         embeddings_varying_decoder = {
             name: input_vectors[name][:, max_encoder_length:] for name in self.decoder_variables  # select decoder
         }
@@ -76,6 +101,9 @@ class PollutionTFT(TemporalFusionTransformer):
             embeddings_varying_decoder,
             static_context_variable_selection[:, max_encoder_length:],
         )
+
+        # NEW ADDITION--- ADD SINUSOIDAL POSITIONAL ENCODING HERE for decoder embeddings ---
+        embeddings_varying_decoder = self.positional_encoding(embeddings_varying_decoder)
 
         # LSTM
         # calculate initial state
@@ -126,7 +154,6 @@ class PollutionTFT(TemporalFusionTransformer):
         output = self.pos_wise_ff(attn_output)
 
         ### NEW ADDITION
-        # output = self.cross_target_attention(output)
         if self.n_targets > 1:
             # Expand for each target: (batch, targets, decoder_length, hidden)
             expanded_output = output.unsqueeze(1).repeat(1, self.n_targets, 1, 1)
