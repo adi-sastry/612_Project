@@ -1,7 +1,8 @@
 from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from pytorch_forecasting.metrics import QuantileLoss
+from pytorch_forecasting.metrics import QuantileLoss, SMAPE, MQF2DistributionLoss
+from tft import PollutionTFT
 
 def train_model(df_long, tft_dataset, hyparams):
     val_dataset = TimeSeriesDataSet.from_dataset(
@@ -15,13 +16,14 @@ def train_model(df_long, tft_dataset, hyparams):
     ql = QuantileLoss()
 
     # ---- Model ----
-    tft = TemporalFusionTransformer.from_dataset(
+    # tft = TemporalFusionTransformer.from_dataset(
+    tft = PollutionTFT.from_dataset(
         tft_dataset,
         learning_rate=hyparams.get("lr", 3e-4),
-        hidden_size=hyparams.get("hid_size", 64),
+        hidden_size=hyparams.get("hid_size", 128),
         attention_head_size=hyparams.get("attention_head_size", 4),
         dropout=hyparams.get("dropout", 0.1),
-        hidden_continuous_size=hyparams.get("hid_cont_size", 32),
+        hidden_continuous_size=hyparams.get("hid_cont_size", 128),
         output_size=len(ql.quantiles),  
         loss=ql,
         log_interval=-1,
@@ -46,7 +48,7 @@ def train_model(df_long, tft_dataset, hyparams):
 
     # ---- Trainer ----
     trainer = Trainer(
-        max_epochs=hyparams.get("max_epochs", 70),
+        max_epochs=hyparams.get("max_epochs", 100),
         accelerator="cpu",
         devices=1,
         gradient_clip_val=hyparams.get("grad_clip_val", 0.2),

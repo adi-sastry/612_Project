@@ -5,6 +5,20 @@ from tft_training import train_model
 from tft_evaluate import evaluate_model
 from tft_hyperparameters import tft_hyparams
 
+import random, os, numpy as np, torch
+
+# seed = 42
+# random.seed(seed)
+# np.random.seed(seed)
+# torch.manual_seed(seed)
+# torch.cuda.manual_seed_all(seed)
+
+# # Force PyTorch to be deterministic
+# torch.backends.cudnn.deterministic = True
+# torch.backends.cudnn.benchmark = False
+# os.environ["PYTHONHASHSEED"] = str(seed)
+
+
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cities", type=str, default="Los Angeles",

@@ -9,14 +9,21 @@ class CrossTargetAttention(nn.Module):
         super().__init__()
         self.attn = nn.MultiheadAttention(embed_dim=input_dim, num_heads=num_heads, batch_first=True)
         self.proj = nn.Linear(input_dim, hidden_dim)
-
+        self.layer_norm = nn.LayerNorm(hidden_dim)  # add LayerNorm
+    
     def forward(self, x):
-        # x: (batch, target, time, hidden_dim)
-        B, T, D = x.shape[0], x.shape[2], x.shape[3]
-        x = x.permute(0, 2, 1, 3).reshape(B * T, x.shape[1], D)  # → (B*T, targets, D)
-        out, _ = self.attn(x, x, x)
-        out = out.reshape(B, T, x.shape[1], D).permute(0, 2, 1, 3)  # (B, targets, time, D)
-        return self.proj(out)
+        # x: (batch, targets, time, hidden)
+        B, T, time_steps, D = x.shape
+        x_reshaped = x.permute(0, 2, 1, 3).reshape(B * time_steps, T, D)
+        
+        attn_out, _ = self.attn(x_reshaped, x_reshaped, x_reshaped)
+        attn_out = self.proj(attn_out)
+        
+        attn_out = attn_out.reshape(B, time_steps, T, D).permute(0, 2, 1, 3)  # back to (B, targets, time, D)
+        
+        # residual + norm
+        out = self.layer_norm(x + attn_out)
+        return out
     
 class SinusoidalPositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 5000):

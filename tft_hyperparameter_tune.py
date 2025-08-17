@@ -8,14 +8,15 @@ from pytorch_forecasting.metrics import SMAPE
 
 def obj(trial):
     hparams ={
-        "lr": trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True),
+        "lr": 1e-3,
         "hid_size": trial.suggest_categorical("hidden_size", [16, 32, 64]),
-        "attention_head_size":trial.suggest_int("attention_head_size", 1, 4),
-        "dropout": trial.suggest_float("dropout", 0.1, 0.5),
+        "attention_head_size":1,
+        "dropout": 0.2,
         "hid_cont_size":trial.suggest_categorical("hidden_continuous_size", [8, 16, 32]),
-        "max_epochs": 10,
-        "grad_clip_val":trial.suggest_float("gradient_clip_val", 0.01, 1.0),
-        "lim_train_batch":0.1
+        "max_epochs": 500,
+        "grad_clip_val":0.1,        
+        "lim_train_batch":0.1,
+        "lstm_layers":1
 
                 }
     df_long, tft_dataset = preprocessing()

@@ -2,9 +2,10 @@ import os
 import pandas as pd
 from pathlib import Path
 from pytorch_forecasting import TimeSeriesDataSet
-from pytorch_forecasting.data import GroupNormalizer
+from pytorch_forecasting.data import GroupNormalizer, MultiNormalizer
+from sklearn.preprocessing import StandardScaler
 
-def preprocessing(csv="cleaned_pollution_data.csv", city="Los Angeles", cities=None, max_prediction_length=7, max_encoder_length=30):
+def preprocessing(csv="cleaned_pollution_data.csv", city="Los Angeles", cities=None, max_prediction_length=14, max_encoder_length=100):
     pollution_cleaned = pd.read_csv(csv)
     pollution_cleaned["Date"] = pd.to_datetime(pollution_cleaned["Date"])
 

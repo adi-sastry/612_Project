@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 
 from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
 from pytorch_forecasting.metrics import SMAPE
+from tft import PollutionTFT
 
 
 def _ensure_outdir():
@@ -19,7 +20,8 @@ def _to_numpy(t):
 
 
 def evaluate_model(df_long, tft_dataset, bmp, batch_size=640):
-    model = TemporalFusionTransformer.load_from_checkpoint(bmp)
+    model = PollutionTFT.load_from_checkpoint(bmp)
+    # model = TemporalFusionTransformer.load_from_checkpoint(bmp)
 
     # Build deterministic validation loader
     val_dataset = TimeSeriesDataSet.from_dataset(
@@ -66,6 +68,24 @@ def evaluate_model(df_long, tft_dataset, bmp, batch_size=640):
 
     # ----- overall metrics -----
     smape = SMAPE()(preds_all.squeeze(-1), acts_all.squeeze(-1)).item()
+    smape_per_pollutant = {}
+
+    for tgt in np.unique(tgt_names_all):
+        mask = (tgt_names_all == tgt)
+        yt = acts_all[mask].squeeze(-1)  # shape: [samples, time_steps]
+        yp = preds_all[mask].squeeze(-1) # shape: [samples, time_steps]
+        
+        # Convert directly to torch tensors (2D)
+        yt_t = torch.tensor(yt, dtype=torch.float32)
+        yp_t = torch.tensor(yp, dtype=torch.float32)
+        
+        smape_frac = SMAPE()(yp_t, yt_t).item()
+        smape_per_pollutant[tgt] = smape_frac * 100
+
+    print("SMAPE per pollutant (%):")
+    for tgt, val in smape_per_pollutant.items():
+        print(f"  {tgt}: {val:.2f}%")
+    
     y_true = _to_numpy(acts_all)   
     y_pred = _to_numpy(preds_all)  
 
@@ -117,6 +137,8 @@ def evaluate_model(df_long, tft_dataset, bmp, batch_size=640):
     pd.DataFrame(city_rows).to_csv("outputs/metrics_by_city.csv", index=False)
 
     # ----- Best-sample plot overall -----
+    print(f"acts tensor: {acts_tensor}")
+    print(f"preds tensor: {preds_tensor}")
     eps = 1e-8
     s_err = 200.0 * np.mean(
         np.abs(y_pred - y_true) / (np.abs(y_pred) + np.abs(y_true) + eps),
