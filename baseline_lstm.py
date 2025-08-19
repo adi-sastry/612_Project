@@ -1,32 +1,109 @@
+import os
+import argparse
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
 import torch
 import torch.nn as nn
-import numpy as np
-from torch.utils.data import DataLoader, Dataset
-import pandas as pd
-import argparse
 import torch.optim as optim
-import os
+from torch.utils.data import Dataset, DataLoader
 
-#Preparing multivariate time series data
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from pytorch_forecasting.metrics import SMAPE
+
+
+# -----------------------------
+# Dataset 
+# -----------------------------
 class MultivarTimeSeriesDataset(Dataset):
-    def __init__(self,df, target_cols, covar_cols,seq_len=30, pred_len = 7):
+    def __init__(self, df, target_cols, covar_cols, seq_len=30, pred_len=7):
         self.seq_len = seq_len
         self.pred_len = pred_len
-        self.target_cols=target_cols
+        self.target_cols = target_cols
         self.covar_cols = covar_cols
         self.feature_cols = target_cols + covar_cols
 
-        df = df.sort_values("time_idx").reset_index(drop=True)
-        self.data = df[self.feature_cols].values.astype("float32")
+        df = df.sort_values(["CityID", "time_idx"]).reset_index(drop=True)
+        self.X = df[self.feature_cols].values.astype("float32")
+        self.city_ids = df["CityID"].values.astype("int64")
+
+        self.starts = self._valid_starts(self.city_ids, len(df), seq_len + pred_len)
+
+    @staticmethod
+    def _valid_starts(city_ids: np.ndarray, T: int, window: int) -> np.ndarray:
+        # segment indices per city
+        cut = np.where(np.diff(city_ids) != 0)[0] + 1
+        segs = np.concatenate([[0], cut, [T]])
+
+        starts = []
+        for s, e in zip(segs[:-1], segs[1:]):
+            if e - s >= window:
+                starts.extend(range(s, e - window + 1))
+        return np.array(starts, dtype=np.int64)
 
     def __len__(self):
-        return len(self.data) - self.seq_len - self.pred_len
-    
-    def __getitem__(self,idx):
-        x = self.data[idx: idx+self.seq_len]
-        y = self.data[idx + self.seq_len : idx + self.seq_len + self.pred_len, :len(self.target_cols)]
-        return torch.tensor(x), torch.tensor(y)
-    
+        return len(self.starts)
+
+    def __getitem__(self, i):
+        idx = self.starts[i]
+        x = self.X[idx: idx + self.seq_len]  # [L, F]
+        y = self.X[idx + self.seq_len: idx + self.seq_len + self.pred_len, :len(self.target_cols)]  # [H, T]
+        cid = self.city_ids[idx + self.seq_len - 1]
+        return torch.from_numpy(x), torch.from_numpy(y), torch.tensor(cid, dtype=torch.long)
+
+
+# -----------------------------
+# Data prep
+# -----------------------------
+def lstm_preprocessing(csv="cleaned_pollution_data.csv", city="Los Angeles", cities=None):
+    df = pd.read_csv(csv)
+    df["Date"] = pd.to_datetime(df["Date"])
+
+    if cities is not None and len(cities) > 0:
+        df = df[df["City"].isin(cities)].copy()
+    else:
+        df = df[df["City"] == city].copy()
+
+    df = df.dropna().sort_values(["City", "Date"]).reset_index(drop=True)
+
+    # Keep both readable and numeric city identifiers
+    df["CityName"] = df["City"].astype(str)
+    df["CityID"] = df["CityName"].astype("category").cat.codes
+    df["time_idx"] = (df["Date"] - df["Date"].min()).dt.days
+
+    target_cols = ["O3 Mean", "CO Mean", "SO2 Mean"]
+
+    keeps = ["Date", "CityName", "CityID", "time_idx"] + target_cols + [
+        "Month", "DayOfWeek", "IsWeekend", "IsWedThur",
+        "O3 Mean_lag1", "CO Mean_lag1", "SO2 Mean_lag1", "NO2 Mean_lag1", "Pollution_Avg",
+    ]
+    # guard if any expected cols are missing
+    missing = [c for c in keeps if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns in CSV: {missing}")
+
+    df = df[keeps]
+    df = df.loc[:, ~df.columns.duplicated()]  # safety
+
+    return df
+
+
+def train_val_split(df: pd.DataFrame, val_ratio=0.2):
+    """Chronological split within each CityID, then concat."""
+    parts = []
+    for cid, g in df.sort_values(["CityID", "time_idx"]).groupby("CityID"):
+        cut = int(len(g) * (1 - val_ratio))
+        parts.append((g.iloc[:cut].copy(), g.iloc[cut:].copy()))
+    train_df = pd.concat([p[0] for p in parts], ignore_index=True)
+    val_df = pd.concat([p[1] for p in parts], ignore_index=True)
+    return train_df, val_df
+
+
+# -----------------------------
+# Model
+# -----------------------------
 class LSTMForecaster(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers=2, dropout=0.2):
         super().__init__()
@@ -34,123 +111,200 @@ class LSTMForecaster(nn.Module):
         self.decoder = nn.Linear(hidden_dim, output_dim)
         self.decoder_hidden = nn.Linear(output_dim, hidden_dim)
 
-    #forward pass, takes input tensor x and time steps. x goes through encoder to get hidden time steps then initialize the decoder inputs as the last hidden state of output
-    # from encoder
-    def forward (self,x, pred_len=7):
-        batch_size = x.size(0)
-        encoder_output,_ = self.encoder(x)
-
-        outputs = []
-        decoder_input = encoder_output[:, -1 , :]
-
-        #autoregressive loop - pass decoder to linear layer ang get output for given timestep and append predictio to output list
-        #update decoder by passing the prediction through decoder hidden and Relu. Stack predicted outputs
+    def forward(self, x, pred_len=7):
+        enc_out, _ = self.encoder(x)       
+        dec_in = enc_out[:, -1, :]         
+        outs = []
         for _ in range(pred_len):
-            out = self.decoder(decoder_input)
-            outputs.append(out)
+            y_t = self.decoder(dec_in)     
+            outs.append(y_t)
+            dec_in = torch.relu(self.decoder_hidden(y_t))
+        return torch.stack(outs, dim=1)    
 
-            decoder_input = torch.relu(self.decoder_hidden(out))
 
-        outputs = torch.stack(outputs, dim=1)
-        return outputs
+# -----------------------------
+# Train / Eval
+# -----------------------------
+def lstm_train_eval(
+    df,
+    seq_len=30,
+    pred_len=7,
+    batch_size=64,
+    epochs=20,
+    hidden_dim=64,
+    num_layers=2,
+    dropout=0.2,
+    lr=1e-3,
+    grad_clip=1.0,
+    patience=5,
+    device=None,
+):
+    Path("lstm_outputs").mkdir(exist_ok=True)
+    Path("outputs").mkdir(exist_ok=True)
 
-#allows us to specify cities of interest and the csv path
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    target_cols = ["O3 Mean", "CO Mean", "SO2 Mean"]
+    covar_cols = [
+        "time_idx", "CityID", "Month", "DayOfWeek", "IsWeekend", "IsWedThur",
+        "O3 Mean_lag1", "CO Mean_lag1", "SO2 Mean_lag1", "NO2 Mean_lag1", "Pollution_Avg",
+    ]
+
+    train_df, val_df = train_val_split(df, val_ratio=0.2)
+    train_ds = MultivarTimeSeriesDataset(train_df, target_cols, covar_cols, seq_len, pred_len)
+    val_ds   = MultivarTimeSeriesDataset(val_df,   target_cols, covar_cols, seq_len, pred_len)
+
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=0, pin_memory=True)
+    val_dl   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
+
+    input_dim = len(target_cols) + len(covar_cols)
+    output_dim = len(target_cols)
+
+    model = LSTMForecaster(input_dim, hidden_dim, output_dim, num_layers=num_layers, dropout=dropout).to(device)
+    opt = optim.Adam(model.parameters(), lr=lr)
+    sch = optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=2)
+    loss_fn = nn.MSELoss()
+
+    best_val = float("inf")
+    bad_epochs = 0
+
+    for ep in range(1, epochs + 1):
+        # ---- Train
+        model.train()
+        tr_losses = []
+        for xb, yb, _ in train_dl:
+            xb, yb = xb.to(device), yb.to(device)
+            opt.zero_grad()
+            yp = model(xb, pred_len=pred_len)
+            loss = loss_fn(yp, yb)
+            loss.backward()
+            if grad_clip is not None:
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            opt.step()
+            tr_losses.append(loss.item())
+
+        # ---- Val
+        model.eval()
+        va_losses = []
+        with torch.no_grad():
+            for xb, yb, _ in val_dl:
+                xb, yb = xb.to(device), yb.to(device)
+                yp = model(xb, pred_len=pred_len)
+                va_losses.append(loss_fn(yp, yb).item())
+
+        tr = float(np.mean(tr_losses)) if tr_losses else float("nan")
+        va = float(np.mean(va_losses)) if va_losses else float("nan")
+        sch.step(va)
+        print(f"Epoch {ep}/{epochs}  •  Train {tr:.4f}  Val {va:.4f}  (lr={opt.param_groups[0]['lr']:.2e})")
+
+        if va + 1e-9 < best_val:
+            best_val = va
+            bad_epochs = 0
+            torch.save(model.state_dict(), "lstm_outputs/best_lstm_model.pth")
+        else:
+            bad_epochs += 1
+            if bad_epochs >= patience:
+                print(f"Early stopping at epoch {ep}  (best val {best_val:.4f})")
+                break
+
+    # ---- Final eval on val set 
+    model.load_state_dict(torch.load("lstm_outputs/best_lstm_model.pth", map_location=device))
+    model.eval()
+
+    preds, trues, cids = [], [], []
+    with torch.no_grad():
+        for xb, yb, cid in val_dl:
+            xb = xb.to(device)
+            yp = model(xb, pred_len=pred_len).cpu().numpy()  
+            preds.append(yp)
+            trues.append(yb.numpy())
+            cids.append(cid.numpy())
+
+    y_pred = np.concatenate(preds, axis=0)  
+    y_true = np.concatenate(trues, axis=0)  
+    cids   = np.concatenate(cids, axis=0).astype(int)
+    H = y_true.shape[1]
+    T = y_true.shape[2]
+    tgt_names = ["O3 Mean", "CO Mean", "SO2 Mean"]
+
+    # --- Aggregate metrics
+    rows = []
+
+    # Step-wise MSE across all targets
+    for h in range(H):
+        rows.append({
+            "metric": "MSE_step", "horizon": h + 1, "target": "ALL",
+            "value": mean_squared_error(y_true[:, h, :].ravel(), y_pred[:, h, :].ravel())
+        })
+
+    # Per-pollutant metrics
+    for ti, tname in enumerate(tgt_names):
+        yt = y_true[:, :, ti].ravel()
+        yp = y_pred[:, :, ti].ravel()
+        rows += [
+            {"metric": "MAE_target",  "horizon": "ALL", "target": tname, "value": mean_absolute_error(yt, yp)},
+            {"metric": "RMSE_target", "horizon": "ALL", "target": tname, "value": mean_squared_error(yt, yp, squared=False)},
+            {"metric": "R2_target",   "horizon": "ALL", "target": tname, "value": r2_score(yt, yp)},
+        ]
+
+    # Aggregate RMSE
+    rmse_agg = mean_squared_error(y_true.ravel(), y_pred.ravel(), squared=False)
+    rows.append({"metric": "RMSE_agg", "horizon": "ALL", "target": "ALL", "value": rmse_agg})
+
+    # SMAPE (aggregate across all steps/targets)
+    # Flatten to [N*H*T] for symmetric comparison
+    smape_val = SMAPE()(
+        torch.tensor(y_pred.reshape(-1, 1), dtype=torch.float32),
+        torch.tensor(y_true.reshape(-1, 1), dtype=torch.float32),
+    ).item()
+    rows.append({"metric": "SMAPE_agg", "horizon": "ALL", "target": "ALL", "value": smape_val})
+
+    Path("outputs").mkdir(exist_ok=True)
+    pd.DataFrame(rows).to_csv("outputs/lstm_metrics.csv", index=False)
+
+    # --- Per-city metrics (aggregate)
+    city_rows = []
+    for cid in np.unique(cids):
+        m = (cids == cid)
+        yt_c = y_true[m].ravel()
+        yp_c = y_pred[m].ravel()
+        city_rows += [
+            {"city": int(cid), "metric": "MAE",  "value": mean_absolute_error(yt_c, yp_c)},
+            {"city": int(cid), "metric": "RMSE", "value": mean_squared_error(yt_c, yp_c, squared=False)},
+            {"city": int(cid), "metric": "R2",   "value": r2_score(yt_c, yp_c)},
+        ]
+        for h in range(H):
+            city_rows.append({
+                "city": int(cid), "metric": "MSE_step", "horizon": h + 1,
+                "value": mean_squared_error(y_true[m, h, :].ravel(), y_pred[m, h, :].ravel()),
+            })
+    pd.DataFrame(city_rows).to_csv("outputs/lstm_metrics_by_city.csv", index=False)
+
+    print("Saved: outputs/lstm_metrics.csv, outputs/lstm_metrics_by_city.csv")
+    print(f"[LSTM] Aggregate RMSE (val): {rmse_agg:.4f} | SMAPE: {smape_val:.4f}")
+    return rmse_agg, smape_val
+
+
+# -----------------------------
+# CLI
+# -----------------------------
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cities", type=str, default="Los Angeles",
                     help='Comma-separated list OR "ALL" (e.g., "Los Angeles,New York" or "ALL")')
     ap.add_argument("--csv", type=str, default="cleaned_pollution_data.csv",
                     help="Path to cleaned dataset CSV")
+    ap.add_argument("--seq_len", type=int, default=30)
+    ap.add_argument("--pred_len", type=int, default=7)
+    ap.add_argument("--batch_size", type=int, default=64)
+    ap.add_argument("--epochs", type=int, default=20)
+    ap.add_argument("--hidden_dim", type=int, default=64)
+    ap.add_argument("--num_layers", type=int, default=2)
+    ap.add_argument("--dropout", type=float, default=0.2)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--grad_clip", type=float, default=1.0)
+    ap.add_argument("--patience", type=int, default=5)
     return ap.parse_args()
 
-
-def lstm_preprocessing(csv="cleaned_pollution_data.csv", city="Los Angeles", cities=None):
-    pollution_cleaned = pd.read_csv(csv)
-    pollution_cleaned["Date"] = pd.to_datetime(pollution_cleaned["Date"])
-
-    if cities is not None and len(cities) > 0:
-        df = pollution_cleaned[pollution_cleaned["City"].isin(cities)].copy()
-    else:
-        df = pollution_cleaned[pollution_cleaned["City"] == city].copy()
-
-    df = df.dropna()
-    df['City'] = df['City'].astype('category').cat.codes
-
-    df["time_idx"] = (df["Date"] - df["Date"].min()).dt.days
-
-    target_columns = ["O3 Mean", "CO Mean", "SO2 Mean"]
-    covars=["time_idx","City","Month","DayOfWeek","IsWeekend","IsWedThur",
-                 "O3 Mean_lag1","CO Mean_lag1","SO2 Mean_lag1","NO2 Mean_lag1","Pollution_Avg"]
-    
-    keeps = ["Date"] + target_columns + covars
-    df = df[keeps]
-
-    return df
-
-#splitting data chronologically 
-def train_val_split (df, val_ratio = 0.2):
-    df = df.sort_values("time_idx").reset_index(drop=True)
-    cut = int(len(df)*(1-val_ratio))
-    train_df = df.iloc[:cut]
-    val_df = df.iloc[cut:]
-    return train_df, val_df
-
-#Training loop - training and validation datasets and data loaders
-def lstm_train(df,seq_len = 30, pred_len = 7, batch_size = 64, epochs =10):
-    os.makedirs("lstm_outputs", exist_ok=True) 
-    train_df, val_df =train_val_split(df)
-
-    target_cols = ["O3 Mean", "CO Mean", "SO2 Mean"]
-    covar_cols = ["time_idx","City","Month","DayOfWeek","IsWeekend","IsWedThur",
-                 "O3 Mean_lag1","CO Mean_lag1","SO2 Mean_lag1","NO2 Mean_lag1","Pollution_Avg"]
-    
-    #Datasets
-    train_ds = MultivarTimeSeriesDataset(train_df, target_cols, covar_cols,seq_len,pred_len)
-    val_ds = MultivarTimeSeriesDataset(val_df, target_cols, covar_cols,seq_len,pred_len)    
-
-    #data loaders
-    train_dl = DataLoader(train_ds, batch_size=batch_size,shuffle=True, num_workers=4)
-    val_dl = DataLoader(val_ds, batch_size=batch_size,shuffle=True, num_workers=4)
-
-    input_dim = len(target_cols) +len(covar_cols)
-    output_dim = len(target_cols)
-    #model = LSTMForecaster(input_dim, hidden_dim=64, output_dim=output_dim)
-    
-    #using the following for quick testing
-    model = LSTMForecaster(input_dim, hidden_dim=32, output_dim=output_dim, num_layers=2)
-
-    optimizer =optim.Adam(model.parameters(), lr=0.001)
-    loss_func = nn.MSELoss()
-
-    best_val_loss = float("inf")
-
-    for e in range(epochs):
-        model.train()
-        train_losses = []
-        for xbatch, ybatch in train_dl:
-            optimizer.zero_grad()
-            y_pred = model(xbatch, pred_len=pred_len)
-            loss = loss_func(y_pred, ybatch)
-            loss.backward()
-            optimizer.step()
-            train_losses.append(loss.item())
-        
-        model.eval()
-        val_losses =[]
-        with torch.no_grad():
-            for xbatch, ybatch in val_dl:
-                y_pred = model(xbatch, pred_len=pred_len)
-                loss = loss_func(y_pred, ybatch)
-                val_losses.append(loss.item())
-        print(f"Epoch {e+1}/{epochs} - Train Loss: {np.mean(train_losses):.4f}, Validation Loss:{np.mean(val_losses):.4f}")
-
-        #savubg the best model 
-        avg_val_loss = np.mean(val_losses)
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), "lstm_outputs/best_lstm_model.pth")
-
-                
 
 def main():
     args = parse_args()
@@ -160,12 +314,22 @@ def main():
         print(f"Discovered {len(cities)} cities.")
     else:
         cities = [c.strip() for c in args.cities.split(",")]
-    
-    df_lstm = lstm_preprocessing(csv=args.csv, cities=cities)
-    #lstm_train(df = df_lstm, seq_len = 30, pred_len = 7, batch_size = 64, epochs =10)
 
-    #using the following for quick testing
-    lstm_train(df = df_lstm, seq_len = 10, pred_len = 7, batch_size = 16, epochs =1)
+    df = lstm_preprocessing(csv=args.csv, cities=cities)
+    rmse_agg, smape_val = lstm_train_eval(
+        df=df,
+        seq_len=args.seq_len,
+        pred_len=args.pred_len,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        hidden_dim=args.hidden_dim,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
+        lr=args.lr,
+        grad_clip=args.grad_clip,
+        patience=args.patience,
+    )
+    print(f"[LSTM] Final — RMSE_agg: {rmse_agg:.4f} | SMAPE: {smape_val:.4f}")
 
 
 if __name__ == "__main__":
