@@ -73,7 +73,7 @@ def lstm_preprocessing(csv="cleaned_pollution_data.csv", city="Los Angeles", cit
     df["CityID"] = df["CityName"].astype("category").cat.codes
     df["time_idx"] = (df["Date"] - df["Date"].min()).dt.days
 
-    target_cols = ["O3 Mean", "CO Mean", "SO2 Mean"]
+    target_cols = ["O3 Mean", "CO Mean", "SO2 Mean", "NO2 Mean"]
 
     keeps = ["Date", "CityName", "CityID", "time_idx"] + target_cols + [
         "Month", "DayOfWeek", "IsWeekend", "IsWedThur",
@@ -127,7 +127,7 @@ class LSTMForecaster(nn.Module):
 # -----------------------------
 def lstm_train_eval(
     df,
-    seq_len=30,
+    seq_len=30, 
     pred_len=7,
     batch_size=64,
     epochs=20,
@@ -143,7 +143,7 @@ def lstm_train_eval(
     Path("outputs").mkdir(exist_ok=True)
 
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    target_cols = ["O3 Mean", "CO Mean", "SO2 Mean"]
+    target_cols = ["O3 Mean", "CO Mean", "SO2 Mean", "NO2 Mean"]
     covar_cols = [
         "time_idx", "CityID", "Month", "DayOfWeek", "IsWeekend", "IsWedThur",
         "O3 Mean_lag1", "CO Mean_lag1", "SO2 Mean_lag1", "NO2 Mean_lag1", "Pollution_Avg",
@@ -166,6 +166,12 @@ def lstm_train_eval(
 
     best_val = float("inf")
     bad_epochs = 0
+
+    loss_hist ={
+        "epoch": [],
+        "train_loss":[],
+        "val_loss":[],
+    }
 
     for ep in range(1, epochs + 1):
         # ---- Train
@@ -193,6 +199,11 @@ def lstm_train_eval(
 
         tr = float(np.mean(tr_losses)) if tr_losses else float("nan")
         va = float(np.mean(va_losses)) if va_losses else float("nan")
+
+        loss_hist["epoch"].append(ep)
+        loss_hist["train_loss"].append(tr)
+        loss_hist["val_loss"].append(va)
+
         sch.step(va)
         print(f"Epoch {ep}/{epochs}  •  Train {tr:.4f}  Val {va:.4f}  (lr={opt.param_groups[0]['lr']:.2e})")
 
@@ -210,6 +221,9 @@ def lstm_train_eval(
     model.load_state_dict(torch.load("lstm_outputs/best_lstm_model.pth", map_location=device))
     model.eval()
 
+    pd.DataFrame(loss_hist).to_csv("outputs/lstm_loss_history.csv", index=False)
+
+
     preds, trues, cids = [], [], []
     with torch.no_grad():
         for xb, yb, cid in val_dl:
@@ -224,7 +238,7 @@ def lstm_train_eval(
     cids   = np.concatenate(cids, axis=0).astype(int)
     H = y_true.shape[1]
     T = y_true.shape[2]
-    tgt_names = ["O3 Mean", "CO Mean", "SO2 Mean"]
+    tgt_names = ["O3 Mean", "CO Mean", "SO2 Mean", "NO2 Mean"]
 
     # --- Aggregate metrics
     rows = []
@@ -250,6 +264,9 @@ def lstm_train_eval(
     rmse_agg = mean_squared_error(y_true.ravel(), y_pred.ravel(), squared=False)
     rows.append({"metric": "RMSE_agg", "horizon": "ALL", "target": "ALL", "value": rmse_agg})
 
+    r2_agg = r2_score(y_true.reshape(-1), y_pred.reshape(-1))
+    rows.append({"metric": "R2_agg", "horizon": "ALL", "target": "ALL", "value": r2_agg})
+
     # SMAPE (aggregate across all steps/targets)
     # Flatten to [N*H*T] for symmetric comparison
     smape_val = SMAPE()(
@@ -257,6 +274,27 @@ def lstm_train_eval(
         torch.tensor(y_true.reshape(-1, 1), dtype=torch.float32),
     ).item()
     rows.append({"metric": "SMAPE_agg", "horizon": "ALL", "target": "ALL", "value": smape_val})
+
+    #SMAPE per horizon
+    for h in range(H):
+        smape_step = SMAPE()(
+            torch.tensor(y_pred[:, h, :].reshape(-1, 1), dtype=torch.float32),
+            torch.tensor(y_true[:, h, :].reshape(-1, 1), dtype=torch.float32)
+        ).item()
+        rows.append({
+        "metric": "SMAPE_step", "horizon": h + 1, "target": "ALL", "value": smape_step
+        })
+
+    #SMAPE per pollutant
+    for ti, tname in enumerate(tgt_names):
+        smape_target = SMAPE()(
+            torch.tensor(y_pred[:, :, ti].reshape(-1, 1), dtype=torch.float32),
+            torch.tensor(y_true[:, :, ti].reshape(-1, 1), dtype=torch.float32),
+        ).item()
+        rows.append({
+        "metric": "SMAPE_target", "horizon": "ALL", "target": tname, "value": smape_target
+        })
+
 
     Path("outputs").mkdir(exist_ok=True)
     pd.DataFrame(rows).to_csv("outputs/lstm_metrics.csv", index=False)

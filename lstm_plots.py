@@ -198,6 +198,28 @@ def plot_best_and_residuals(
     y_pred = np.concatenate(preds, axis=0)
     y_true = np.concatenate(trues, axis=0)
 
+    pols = TARGET_COLS
+    p_len = y_true.shape[1]
+    n_tar = y_true.shape[2]
+
+    mse_matrix = np.mean((y_true-y_pred)**2,axis = 0)
+
+    plt.figure(figsize=(8,5))
+    for i in range(n_tar):
+        plt.plot(
+        np.arange(1,p_len+1),
+        mse_matrix[:,i],
+        marker="o",
+        label=pols[i])
+    plt.xlabel("Forecast Horizon (days)")
+    plt.ylabel("MSE")
+    plt.title("MSE per Forecast Step (per Pollutant)")
+    plt.legend()
+    plt.tight_layout()
+    Path("outputs").mkdir(exist_ok=True)
+    plt.savefig("outputs/lstm_mse_per_step_per_pollutant.png")
+    print("Saved: outputs/lstm_mse_per_step_per_pollutant.png")
+
     # Best sample by SMAPE-like score
     eps = 1e-8
     s_err = 200.0 * np.mean(
