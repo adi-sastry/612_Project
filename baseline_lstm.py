@@ -15,7 +15,7 @@ from pytorch_forecasting.metrics import SMAPE
 
 
 # -----------------------------
-# Dataset 
+# Dataset
 # -----------------------------
 class MultivarTimeSeriesDataset(Dataset):
     def __init__(self, df, target_cols, covar_cols, seq_len=30, pred_len=7):
@@ -112,14 +112,14 @@ class LSTMForecaster(nn.Module):
         self.decoder_hidden = nn.Linear(output_dim, hidden_dim)
 
     def forward(self, x, pred_len=7):
-        enc_out, _ = self.encoder(x)       
-        dec_in = enc_out[:, -1, :]         
+        enc_out, _ = self.encoder(x)
+        dec_in = enc_out[:, -1, :]
         outs = []
         for _ in range(pred_len):
-            y_t = self.decoder(dec_in)     
+            y_t = self.decoder(dec_in)
             outs.append(y_t)
             dec_in = torch.relu(self.decoder_hidden(y_t))
-        return torch.stack(outs, dim=1)    
+        return torch.stack(outs, dim=1)
 
 
 # -----------------------------
@@ -127,7 +127,7 @@ class LSTMForecaster(nn.Module):
 # -----------------------------
 def lstm_train_eval(
     df,
-    seq_len=30, 
+    seq_len=30,
     pred_len=7,
     batch_size=64,
     epochs=20,
@@ -167,10 +167,11 @@ def lstm_train_eval(
     best_val = float("inf")
     bad_epochs = 0
 
-    loss_hist ={
+    loss_hist = {
         "epoch": [],
-        "train_loss":[],
-        "val_loss":[],
+        "train_loss": [],
+        "train_eval_loss": [],
+        "val_loss": [],
     }
 
     for ep in range(1, epochs + 1):
@@ -187,25 +188,34 @@ def lstm_train_eval(
                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             opt.step()
             tr_losses.append(loss.item())
+        tr = float(np.mean(tr_losses)) if tr_losses else float("nan")
+
+        # ---- Train (eval mode) to compare fairly
+        model.eval()
+        tr_eval_losses = []
+        with torch.no_grad():
+            for xb, yb, _ in train_dl:
+                xb, yb = xb.to(device), yb.to(device)
+                yp = model(xb, pred_len=pred_len)
+                tr_eval_losses.append(loss_fn(yp, yb).item())
+        tr_eval = float(np.mean(tr_eval_losses)) if tr_eval_losses else float("nan")
 
         # ---- Val
-        model.eval()
         va_losses = []
         with torch.no_grad():
             for xb, yb, _ in val_dl:
                 xb, yb = xb.to(device), yb.to(device)
                 yp = model(xb, pred_len=pred_len)
                 va_losses.append(loss_fn(yp, yb).item())
-
-        tr = float(np.mean(tr_losses)) if tr_losses else float("nan")
         va = float(np.mean(va_losses)) if va_losses else float("nan")
 
         loss_hist["epoch"].append(ep)
         loss_hist["train_loss"].append(tr)
+        loss_hist["train_eval_loss"].append(tr_eval)
         loss_hist["val_loss"].append(va)
 
         sch.step(va)
-        print(f"Epoch {ep}/{epochs}  •  Train {tr:.4f}  Val {va:.4f}  (lr={opt.param_groups[0]['lr']:.2e})")
+        print(f"Epoch {ep}/{epochs}  •  Train {tr:.4f} | Train(eval) {tr_eval:.4f} | Val {va:.4f}  (lr={opt.param_groups[0]['lr']:.2e})")
 
         if va + 1e-9 < best_val:
             best_val = va
@@ -217,24 +227,23 @@ def lstm_train_eval(
                 print(f"Early stopping at epoch {ep}  (best val {best_val:.4f})")
                 break
 
-    # ---- Final eval on val set 
+    # ---- Final eval on val set
     model.load_state_dict(torch.load("lstm_outputs/best_lstm_model.pth", map_location=device))
     model.eval()
 
     pd.DataFrame(loss_hist).to_csv("outputs/lstm_loss_history.csv", index=False)
 
-
     preds, trues, cids = [], [], []
     with torch.no_grad():
         for xb, yb, cid in val_dl:
             xb = xb.to(device)
-            yp = model(xb, pred_len=pred_len).cpu().numpy()  
+            yp = model(xb, pred_len=pred_len).cpu().numpy()
             preds.append(yp)
             trues.append(yb.numpy())
             cids.append(cid.numpy())
 
-    y_pred = np.concatenate(preds, axis=0)  
-    y_true = np.concatenate(trues, axis=0)  
+    y_pred = np.concatenate(preds, axis=0)
+    y_true = np.concatenate(trues, axis=0)
     cids   = np.concatenate(cids, axis=0).astype(int)
     H = y_true.shape[1]
     T = y_true.shape[2]
@@ -256,12 +265,12 @@ def lstm_train_eval(
         yp = y_pred[:, :, ti].ravel()
         rows += [
             {"metric": "MAE_target",  "horizon": "ALL", "target": tname, "value": mean_absolute_error(yt, yp)},
-            {"metric": "RMSE_target", "horizon": "ALL", "target": tname, "value": mean_squared_error(yt, yp, squared=False)},
+            {"metric": "RMSE_target", "horizon": "ALL", "target": tname, "value": np.sqrt(mean_squared_error(yt, yp))},
             {"metric": "R2_target",   "horizon": "ALL", "target": tname, "value": r2_score(yt, yp)},
         ]
 
     # Aggregate RMSE
-    rmse_agg = mean_squared_error(y_true.ravel(), y_pred.ravel(), squared=False)
+    rmse_agg = np.sqrt(mean_squared_error(y_true.ravel(), y_pred.ravel()))
     rows.append({"metric": "RMSE_agg", "horizon": "ALL", "target": "ALL", "value": rmse_agg})
 
     r2_agg = r2_score(y_true.reshape(-1), y_pred.reshape(-1))
@@ -275,26 +284,25 @@ def lstm_train_eval(
     ).item()
     rows.append({"metric": "SMAPE_agg", "horizon": "ALL", "target": "ALL", "value": smape_val})
 
-    #SMAPE per horizon
+    # SMAPE per horizon
     for h in range(H):
         smape_step = SMAPE()(
             torch.tensor(y_pred[:, h, :].reshape(-1, 1), dtype=torch.float32),
             torch.tensor(y_true[:, h, :].reshape(-1, 1), dtype=torch.float32)
         ).item()
         rows.append({
-        "metric": "SMAPE_step", "horizon": h + 1, "target": "ALL", "value": smape_step
+            "metric": "SMAPE_step", "horizon": h + 1, "target": "ALL", "value": smape_step
         })
 
-    #SMAPE per pollutant
+    # SMAPE per pollutant
     for ti, tname in enumerate(tgt_names):
         smape_target = SMAPE()(
             torch.tensor(y_pred[:, :, ti].reshape(-1, 1), dtype=torch.float32),
             torch.tensor(y_true[:, :, ti].reshape(-1, 1), dtype=torch.float32),
         ).item()
         rows.append({
-        "metric": "SMAPE_target", "horizon": "ALL", "target": tname, "value": smape_target
+            "metric": "SMAPE_target", "horizon": "ALL", "target": tname, "value": smape_target
         })
-
 
     Path("outputs").mkdir(exist_ok=True)
     pd.DataFrame(rows).to_csv("outputs/lstm_metrics.csv", index=False)
@@ -307,7 +315,7 @@ def lstm_train_eval(
         yp_c = y_pred[m].ravel()
         city_rows += [
             {"city": int(cid), "metric": "MAE",  "value": mean_absolute_error(yt_c, yp_c)},
-            {"city": int(cid), "metric": "RMSE", "value": mean_squared_error(yt_c, yp_c, squared=False)},
+            {"city": int(cid), "metric": "RMSE", "value": np.sqrt(mean_squared_error(yt_c, yp_c))},
             {"city": int(cid), "metric": "R2",   "value": r2_score(yt_c, yp_c)},
         ]
         for h in range(H):

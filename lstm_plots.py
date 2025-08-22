@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
-TARGET_COLS = ["O3 Mean", "CO Mean", "SO2 Mean"]
+TARGET_COLS = ["O3 Mean", "CO Mean", "SO2 Mean", "NO2 Mean"]
 COVAR_COLS = [
     "time_idx", "CityID", "Month", "DayOfWeek", "IsWeekend", "IsWedThur",
     "O3 Mean_lag1", "CO Mean_lag1", "SO2 Mean_lag1", "NO2 Mean_lag1", "Pollution_Avg",
@@ -110,21 +110,28 @@ def plot_per_pollutant_bars(metrics_csv, out_prefix="outputs/lstm_pollutant_"):
     if subset.empty:
         print("No per-pollutant metrics found; skipping bar plots.")
         return
+
+    desired_order = ["O3 Mean", "CO Mean", "SO2 Mean", "NO2 Mean"]
+
     for metric in ["MAE_target", "RMSE_target", "R2_target"]:
         sub = subset[subset["metric"] == metric]
         if sub.empty:
             continue
         pivot = sub.pivot(index="target", columns="metric", values="value")
-        vals = pivot[metric].reindex(["O3 Mean","CO Mean","SO2 Mean"]).values
-        labels = ["O3 Mean","CO Mean","SO2 Mean"]
-        plt.figure(figsize=(7, 4))
+        labels = [t for t in desired_order if t in pivot.index]
+        if not labels:
+            print(f"No targets found for {metric}; skipping.")
+            continue
+
+        vals = pivot.loc[labels, metric].values
+        plt.figure(figsize=(8, 4))
         plt.bar(np.arange(len(vals)), vals)
         plt.xticks(np.arange(len(vals)), labels, rotation=0)
-        plt.ylabel(metric.replace("_target",""))
+        plt.ylabel(metric.replace("_target", ""))
         plt.title(f"LSTM Per-Target {metric.replace('_target','')}")
         plt.tight_layout()
-        out_png = f"{out_prefix}{metric.replace('_target','').lower()}.png"
         Path("outputs").mkdir(exist_ok=True)
+        out_png = f"{out_prefix}{metric.replace('_target','').lower()}.png"
         plt.savefig(out_png)
         print(f"Saved: {out_png}")
 
@@ -250,6 +257,35 @@ def plot_best_and_residuals(
     plt.savefig("outputs/lstm_residual_hist_from_model.png")
     print("Saved: outputs/lstm_residual_hist_from_model.png")
 
+def plot_loss_history(loss_csv="outputs/lstm_loss_history.csv", out_png="outputs/lstm_loss_history.png"):
+    try:
+        hist = pd.read_csv(loss_csv)
+    except FileNotFoundError:
+        print(f"{loss_csv} not found; skipping loss history plot.")
+        return
+
+    needed = {"epoch", "train_loss", "val_loss"}
+    missing = [c for c in needed if c not in hist.columns]
+    if missing:
+        print(f"Loss history missing columns {missing}; skipping.")
+        return
+
+    has_train_eval = "train_eval_loss" in hist.columns
+
+    plt.figure(figsize=(8, 4.5))
+    plt.plot(hist["epoch"], hist["train_loss"], marker="o", label="train_loss")
+    if has_train_eval:
+        plt.plot(hist["epoch"], hist["train_eval_loss"], marker="o", label="train_eval_loss")
+    plt.plot(hist["epoch"], hist["val_loss"], marker="o", label="val_loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss (MSE)")
+    plt.title("LSTM Loss History")
+    plt.legend()
+    plt.tight_layout()
+    Path("outputs").mkdir(exist_ok=True)
+    plt.savefig(out_png)
+    print(f"Saved: {out_png}")
+
 
 # -----------------------------
 # CLI
@@ -270,6 +306,9 @@ def parse_args():
 def main():
     args = parse_args()
     Path("outputs").mkdir(exist_ok=True)
+
+    # 0) Plot loss history if available
+    plot_loss_history("outputs/lstm_loss_history.csv")
 
     # 1) Plots from saved CSV metrics
     plot_horizon_mse(args.metrics_csv)
