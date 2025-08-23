@@ -6,8 +6,9 @@ DATA/MSML 612 Project - Air Pollution Forecasting Using Transformers
 
         bash setup.sh
         source tft_venv/bin/activate
+2. Run EDA Notebok. This will give you the resulting "cleaned_pollution_data.csv" to use in the following models. Make sure you have obtained the dataset from Kaggle: https://www.kaggle.com/datasets/guslovesmath/us-pollution-data-200-to-2022
 
-2. Run the models:
+3. Run the models:
     (a) Temporal Fusion Transformer
         (i)     To train and evaluate on all cities:
 
@@ -45,8 +46,9 @@ DATA/MSML 612 Project - Air Pollution Forecasting Using Transformers
                     lstm_outputs/best_lstm_model.pth – saved best model checkpoint
                     outputs/lstm_metrics.csv – aggregated performance metrics
                     outputs/lstm_metrics_by_city.csv – per-city metrics
+    (c) Run Informer Notebook
 
-3. Generate LSTM plots:
+5. Generate LSTM plots:
 
         python lstm_make_plots.py --csv cleaned_pollution_data.csv --cities "Los Angeles,New York,Chicago"
 
