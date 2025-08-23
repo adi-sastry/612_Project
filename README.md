@@ -46,7 +46,7 @@ DATA/MSML 612 Project - Air Pollution Forecasting Using Transformers
                     lstm_outputs/best_lstm_model.pth – saved best model checkpoint
                     outputs/lstm_metrics.csv – aggregated performance metrics
                     outputs/lstm_metrics_by_city.csv – per-city metrics
-    (c) Run Informer Notebook
+    (c) Run Informer Notebook (Final_Informer_ProbSparse.ipynb)
 
 5. Generate LSTM plots:
 
